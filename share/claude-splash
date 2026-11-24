@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+# splash — หน้าโหลดของ claude (ถูก source จาก /usr/bin/claude)
+# env: CLAUDE_NO_SPLASH=1 ปิด | CLAUDE_SPLASH_MS=ms/เฟรม | CLAUDE_SPLASH_HOLD=ms ค้างท้าย
+#      CLAUDE_SPLASH_DEBUG=1 เขียน log ที่ ~/.claude-splash.log
+#      CLAUDE_SPLASH_NO_CLEAR=1 ไม่ล้างจอ
+
+splash_log() {
+  [ -n "${CLAUDE_SPLASH_DEBUG:-}" ] || return 0
+  printf '%s %s pid=%s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1" "$$" >> "$HOME/.claude-splash.log" 2>/dev/null
+}
+
+splash() {
+  [ -n "${CLAUDE_NO_SPLASH:-}" ] && { splash_log "skip: CLAUDE_NO_SPLASH"; return 0; }
+
+  local OUT=""
+  if [ -n "${CLAUDE_SPLASH_FORCE:-}" ]; then
+    OUT=1
+  elif { exec {splash_fd}>/dev/tty; } 2>/dev/null; then
+    OUT=$splash_fd
+  else
+    OUT=1
+  fi
+  splash_log "draw: out=$OUT tty1=$([ -t 1 ] && echo yes || echo no) TERM=${TERM:-unset}"
+
+  local model prov stage pct f i c tick label final clear
+  local ncol=30
+  local MS=${CLAUDE_SPLASH_MS:-40}
+  local HOLD=${CLAUDE_SPLASH_HOLD:-800}
+  local NF=10
+  local NS=4
+  local total=$(( NF * NS ))
+
+  # อ่าน settings แบบเร็ว (ไม่ spawn node)
+  local S="$HOME/.claude/settings.json" raw
+  raw=$(grep -oE '"(ANTHROPIC_MODEL|ANTHROPIC_BASE_URL|effortLevel)"[[:space:]]*:[[:space:]]*"[^"]*"' "$S" 2>/dev/null)
+  model=$(printf '%s\n' "$raw" | grep 'ANTHROPIC_MODEL' | head -1 | sed 's/.*:[[:space:]]*"//; s/"$//')
+  prov=$(printf '%s\n' "$raw" | grep 'ANTHROPIC_BASE_URL' | head -1 | sed 's/.*:[[:space:]]*"//; s/"$//')
+  prov=${prov#https://}; prov=${prov#http://}; prov=${prov%%/*}
+  local eff
+  eff=$(grep -oE '"effortLevel"[[:space:]]*:[[:space:]]*"[^"]*"' "$S" 2>/dev/null | head -1 | sed 's/.*:[[:space:]]*"//; s/"$//')
+  [ -z "$model" ] && model="(unset)"
+  [ -z "$prov" ]  && prov="(unset)"
+  [ -z "$eff" ]   && eff="medium"
+
+  # ── ชุดสี: คอรัล-อำพัน ตามแบรนด์ Claude Code (ตรงกับ TUI จริง)
+  local VI=$'\033[38;5;209m'   # coral    — โลโก้ / แถบโหลด / หลัก
+  local CY=$'\033[38;5;215m'   # amber    — ค่าที่เปลี่ยนได้ (model)
+  local DI=$'\033[38;5;245m'   # grey     — ข้อรอง
+  local DK=$'\033[38;5;238m'   # dark     — ราง progress
+  local OK=$'\033[38;5;114m'   # green    — สำเร็จ
+  local B=$'\033[1m' R=$'\033[0m'
+
+  local sp='⣾⣽⣻⢿⡿⣟⣯⣷'
+  local labels=("loading config" "trusting workspace" "checking provider" "linking model")
+
+  # ── ล้างจอ + scrollback ให้หมดจริง ๆ ก่อนวาด (Termux เก็บ scrollback แยกจาก \033[2J)
+  if [ -z "${CLAUDE_SPLASH_NO_CLEAR:-}" ]; then
+    # ED3 (\033[3J) = ล้าง scrollback ด้วย, ED2 = ล้างจอ, H = home
+    printf '\033[3J\033[2J\033[H' >&$OUT
+  fi
+  printf '\033[?25l' >&$OUT
+
+  # ── หัว: โลโก้ + ข้อมูลจริง 3 บรรทัด จัดคอลัมน์ตรงกัน
+  printf '\n' >&$OUT
+  printf '   %s▐▛███▛█%s\n' "$VI" "$R" >&$OUT
+  printf '   %s▝▜██████▀%s   %sClaude Code%s  %s·%s  %sTermux%s\n' \
+    "$VI" "$R" "$B" "$R" "$DK" "$R" "$DI" "$R" >&$OUT
+  printf '   %s ▝▝   ▝▝%s   %s%s%s  %s%s effort%s\n' \
+    "$VI" "$R" "$CY" "$model" "$R" "$DI" "$eff" "$R" >&$OUT
+  printf '                %s%s%s\n\n' "$DK" "$prov" "$R" >&$OUT
+
+  for ((stage=0; stage<NS; stage++)); do
+    label=${labels[$stage]}
+    for ((i=0; i<NF; i++)); do
+      tick=$(( stage*NF + i + 1 ))
+      pct=$(( tick*100/total ))
+      f=$(( tick*ncol/total ))
+      c=${sp:$(( tick % 8 )):1}
+      printf -v final '%*s' "$f" '';    final=${final// /█}
+      printf -v clear '%*s' "$ncol" ''; clear=${clear// /░}
+      printf '\r   %s%s%s %s%-19s%s %s%s%s%s%s %s%3d%%%s  \033[K' \
+        "$VI" "$c" "$R" "$DI" "$label" "$R" "$VI" "$final" "$DK" "${clear:$f}" "$R" "$CY" "$pct" "$R" >&$OUT
+      sleep "0.0$MS" 2>/dev/null || sleep 0.04
+    done
+  done
+
+  printf -v final '%*s' "$ncol" ''; final=${final// /█}
+  printf '\r   %s✔%s %s%-19s%s %s%s%s %s100%%%s  \033[K\n' \
+    "$OK" "$R" "$DI" "ready" "$R" "$OK" "$final" "$R" "$OK" "$R" >&$OUT
+  printf '\n' >&$OUT
+  printf '\033[?25h' >&$OUT
+  splash_log "done: 100% shown"
+
+  if [ "${HOLD:-0}" -gt 0 ] 2>/dev/null; then
+    sleep "$(awk -v ms="$HOLD" 'BEGIN{printf "%.3f", ms/1000}' 2>/dev/null || echo 1)" 2>/dev/null
+    splash_log "hold ${HOLD}ms done"
+  fi
+}
