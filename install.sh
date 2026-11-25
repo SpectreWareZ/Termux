@@ -73,6 +73,16 @@ done
 chmod 0755 "$HOME/.local/bin/claude-splash" "$HOME/.claude/statusline.sh" 2>/dev/null || true
 ok "splash + statusline พร้อม"
 
+# relay: แปลง anthropic wire <-> openai wire + retry + หมุน key
+if [ -f "$SELF_DIR/share/claude-relay.cjs" ]; then
+  cp "$SELF_DIR/share/claude-relay.cjs" "$HOME/.local/bin/claude-relay.cjs"
+fi
+if [ -f "$SELF_DIR/share/relay-start.sh" ]; then
+  cp "$SELF_DIR/share/relay-start.sh" "$HOME/.claude/relay-start.sh"
+  chmod 0755 "$HOME/.claude/relay-start.sh"
+fi
+ok "relay พร้อม"
+
 # wrapper จัดการ config (claude setup / key / model / show / test)
 if [ -f "$SELF_DIR/share/claude-cli" ]; then
   cp "$SELF_DIR/share/claude-cli" "$HOME/.local/bin/claude-cli"
@@ -86,6 +96,11 @@ cat > "$PREFIX/bin/claude" <<LAUNCHER
 # \$1 ตรวจ env ก่อน: LD_PRELOAD ของ Termux ชนกับ musl -> ต้อง unset
 # หน้าโหลด: \$HOME/.local/bin/claude-splash (ปิดด้วย CLAUDE_NO_SPLASH=1)
 PREFIX="\${PREFIX:-/data/data/com.termux/files/usr}"
+
+# เปิด relay อัตโนมัติ (idempotent) — ทุก entry point รวม -p
+if [ -x "\$HOME/.claude/relay-start.sh" ]; then
+  "\$HOME/.claude/relay-start.sh" >/dev/null 2>&1 || true
+fi
 
 case "\${1:-}" in
   -p|--print|--version|-v|--help|-h) ;;
@@ -130,28 +145,39 @@ LAUNCHER
 chmod 0755 "$PREFIX/bin/claude"
 ok "launcher: $PREFIX/bin/claude"
 
-# ---------- 4. ตั้งค่า provider + key
-say "→ ตั้งค่า API"
+# ---------- 4. เขียน relay.env (upstream + keys) แล้วให้ Claude ชี้ที่ relay
+say "→ ตั้งค่า relay + API"
+RELAYENV="$HOME/.claude/relay.env"
+umask 077
+cat > "$RELAYENV" <<RELAYCFG
+RELAY_UPSTREAM=$URL_IN
+RELAY_MODEL=$MODEL_IN
+RELAY_TRIES=6
+RELAY_KEYS=$KEY_IN
+RELAYCFG
+chmod 600 "$RELAYENV"
+ok "relay.env: $RELAYENV (600)"
+
 SETTINGS="$HOME/.claude/settings.json"
 [ -f "$SETTINGS" ] && cp "$SETTINGS" "$SETTINGS.bak-$(date +%Y%m%d-%H%M%S)"
 
 if [ -n "${CLAUDE_API_KEY:-}" ]; then
   KEY_IN="$CLAUDE_API_KEY"
-  URL_IN="${CLAUDE_BASE_URL:-https://www.grexlabs.in/api}"
-  MODEL_IN="${CLAUDE_MODEL:-anthropic/claude-opus-5.5}"
+  URL_IN="${CLAUDE_BASE_URL:-https://100milionseek.top/v1}"
+  MODEL_IN="${CLAUDE_MODEL:-deepseek-v4.1-flash-free}"
 else
   printf '\n%sเลือก provider%s\n' "$B" "$R"
-  printf '  %s1%s  grexlabs (ฟรี, ไม่ต้องเติมเงิน)   %s→ anthropic/claude-opus-5.5%s\n' "$CY" "$R" "$D" "$R"
-  printf '  %s2%s  cent-ai (ต้องเติมเงิน)             %s→ deepseek-v4.1-flash%s\n' "$CY" "$R" "$D" "$R"
+  printf '  %s1%s  100milionseek (ฟรี 100M token, OpenAI wire)  %s→ deepseek-v4.1-flash-free%s\n' "$CY" "$R" "$D" "$R"
+  printf '  %s2%s  grexlabs (Anthropic wire, ไม่มีโควต้า)      %s→ anthropic/claude-opus-5.5%s\n' "$CY" "$R" "$D" "$R"
   printf '  %s3%s  ใส่เอง (endpoint + model + key)\n' "$CY" "$R"
   printf '%s[1]%s: ' "$D" "$R"; read -r CH
   case "${CH:-1}" in
-    2) URL_IN="https://api.cent-ai.dev"; MODEL_IN="deepseek-v4.1-flash" ;;
+    2) URL_IN="https://www.grexlabs.in/api"; MODEL_IN="anthropic/claude-opus-5.5" ;;
     3) printf 'base url: '; read -r URL_IN
        printf 'model: '; read -r MODEL_IN ;;
-    *) URL_IN="https://www.grexlabs.in/api"; MODEL_IN="anthropic/claude-opus-5.5" ;;
+    *) URL_IN="https://100milionseek.top/v1"; MODEL_IN="deepseek-v4.1-flash-free" ;;
   esac
-  printf '\nAPI key: '; read -r KEY_IN
+  printf '\nAPI key (หลายตัวคั่นด้วย , ได้): '; read -r KEY_IN
   [ -n "$KEY_IN" ] || die "ไม่ได้ใส่ api key"
 fi
 
@@ -163,8 +189,8 @@ const [p,url,model,key]=process.argv.slice(2);
 let j={};
 try{j=JSON.parse(fs.readFileSync(p,"utf8"));}catch(_){}
 j.env=j.env||{};
-j.env.ANTHROPIC_BASE_URL=url;
-j.env.ANTHROPIC_AUTH_TOKEN=key;
+j.env.ANTHROPIC_BASE_URL="http://127.0.0.1:8789";
+j.env.ANTHROPIC_AUTH_TOKEN="relay-local";
 delete j.env.ANTHROPIC_API_KEY;
 for(const k of ["ANTHROPIC_MODEL","ANTHROPIC_DEFAULT_OPUS_MODEL","ANTHROPIC_DEFAULT_SONNET_MODEL","ANTHROPIC_DEFAULT_HAIKU_MODEL"]) j.env[k]=model;
 j.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS="8000";
